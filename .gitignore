@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+
+# Environment — never commit secrets
+api/.env
+.env
+
+# Local runtime files
+*.log
+*.pid
+
+# OS
+.DS_Store
+Thumbs.db

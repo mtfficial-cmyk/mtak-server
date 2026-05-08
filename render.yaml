@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: atak-mi-server
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+
+    # Health check — UptimeRobot also pings this endpoint every 5 minutes
+    # to prevent the free-tier service from sleeping.
+    healthCheckPath: /healthz
+
+    envVars:
+      # ── Deployment mode ───────────────────────────────────────────────────
+      - key: RELAY_MODE
+        value: "true"
+
+      # ── Public URL (set this after first deploy so /api/config returns it) ─
+      # Example: https://atak-mi-server.onrender.com
+      - key: SERVER_URL
+        value: ""
+
+      # ── JWT secret — MUST match your local server's JWT_SECRET_KEY ─────────
+      # Set this in the Render dashboard (Environment tab), not here.
+      - key: JWT_SECRET_KEY
+        sync: false
+
+      # ── Port (Render sets this automatically; listed here for visibility) ──
+      - key: PORT
+        value: "10000"

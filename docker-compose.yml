@@ -1,0 +1,32 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: atak_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: "123456"
+      POSTGRES_DB: atak_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - atak_pg_data:/var/lib/postgresql/data
+      - ./postgres/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+
+  minio:
+    image: quay.io/minio/minio
+    container_name: atak_minio
+    restart: unless-stopped
+    command: server /data --console-address ':9001'
+    environment:
+      MINIO_ROOT_USER: atakadmin
+      MINIO_ROOT_PASSWORD: atakadmin123
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - atak_minio_data:/data
+
+volumes:
+  atak_pg_data:
+  atak_minio_data:

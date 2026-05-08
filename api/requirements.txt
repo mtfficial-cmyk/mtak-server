@@ -1,0 +1,13 @@
+fastapi==0.110.0
+uvicorn==0.27.1
+asyncpg==0.29.0
+python-dotenv==1.0.1
+pydantic==2.6.3
+minio==7.2.5
+pyngrok==7.1.5
+passlib[bcrypt]==1.7.4
+bcrypt==4.0.1
+python-multipart==0.0.9
+pyjwt==2.8.0
+paho-mqtt==2.0.0
+pyserial==3.5
