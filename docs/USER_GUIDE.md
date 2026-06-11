@@ -1,83 +1,212 @@
-# ATAK_MI_Server — User Guide
+# ATAK_MI_Server User Guide
 
-Welcome to your new integrated tactical backend. This server combines the realtime capabilities of the ATAK Tactical Bundle with the storage and scaling of your Internet-Facing Production system.
+This guide explains how to run and use `ATAK_MI_Server` in simple words.
 
-> [!NOTE]
-> For a detailed history of how we merged the packages and updated the ATAK app, see the [Project Chronology](PROJECT_CHRONOLOGY.md).
+## What This Server Is
 
-## 1. Quick Start
+This server is the backend for the maritime / tactical Android system.
 
-### Prerequisites
-- **Python 3.10+**: Run `python --version` to check.
-- **Docker Desktop**: Required for the MinIO storage system.
-- **PostgreSQL 17**: Ensure your Postgres service is running (pgAdmin).
+It helps connected users:
 
-### Initialization
-1.  Open PowerShell in the `scripts` folder:
-    ```powershell
-    cd D:\Vijay_Psitech\ATAK_Psitech\Atak-main\Atak-main\ATAK_MI_Server\scripts
-    ```
-2.  Install dependencies:
-    ```powershell
-    pip install -r ../api/requirements.txt
-    ```
-3.  Ensure your `.env` in the `api` folder has the correct database credentials.
+- chat in real time
+- share live GPS locations
+- place and update tactical map markers
+- share routes, drawings, alerts, and measurements
+- upload media files
+- use live stream features
 
-### Start the Server
-Run the professional startup script:
+In short:
+
+> the server keeps all connected devices synchronized.
+
+## How It Works
+
+When a mobile device connects:
+
+1. the user logs in
+2. the app connects to the API / WebSocket server
+3. the app joins a room
+4. the server relays chat and tactical updates to everyone else in that room
+5. in full mode, the server also stores data in PostgreSQL and media in MinIO
+
+## Two Ways To Run It
+
+### Full Mode
+
+Use this on a local machine or field laptop when you want the full stack.
+
+Includes:
+
+- FastAPI backend
+- PostgreSQL
+- MinIO
+- UDP auto-discovery
+- optional MQTT support
+
+### Relay Mode
+
+Use this mainly for cloud deployments when you want a simpler relay server.
+
+This is useful when you only need real-time communication and lighter infrastructure.
+
+## Local Ports
+
+The current setup uses:
+
+- `3001` for the ATAK API and WebSocket server
+- `5433` for PostgreSQL on the host machine
+- `9000` for MinIO API
+- `9001` for MinIO Console
+- `8091` for UDP auto-discovery
+
+## Quick Local Start
+
+### Easy Method
+
+Run:
+
 ```powershell
-.\start_server.ps1
+.\scripts\start.bat
 ```
-This script will start MinIO, launch the FastAPI backend, and begin the UDP Discovery service.
 
----
+This is the easiest local launch method if the environment is prepared.
 
-## 2. Connecting the ATAK App
+### Manual Method
 
-### Auto-Discovery (Local WiFi)
-If your phone and the server PC are on the same WiFi:
-1.  Open the ATAK app.
-2.  The app will broadcast a discovery request.
-3.  The server's **UDP Discovery Service** will reply automatically.
-4.  The Server URL should auto-fill for registration/login.
+```powershell
+docker compose up -d
+pip install -r api/requirements.txt
+cd api
+python -m uvicorn main:app --host 0.0.0.0 --port 3001 --reload
+```
+
+## Docker Services In Local Full Mode
+
+The local `docker-compose.yml` starts:
+
+- PostgreSQL
+- MinIO
+- the ATAK backend server
+
+## Android Client Connection
+
+### Auto-Discovery
+
+If the Android device and server PC are on the same WiFi network:
+
+1. the app sends a UDP discovery request
+2. the server listens on port `8091`
+3. the server replies with its address
+4. the app can fill in the server automatically
 
 ### Manual Connection
-If auto-discovery fails:
-- Enter: `http://<YOUR_PC_IP>:3000`
-- Example: `http://192.168.1.5:3000`
 
----
+If discovery does not work, use:
 
-## 3. Realtime Features
+```text
+http://<YOUR_PC_IP>:3001
+```
 
-This server is "Live." You will notice the following:
-- **Instant Messaging**: Chat messages are pushed via WebSockets immediately.
-- **Live Location**: Map markers for your team update in realtime without needing to refresh.
-- **Tactical Markers**: When one user places a marker (circle, triangle, etc.), it appears on everyone's map instantly.
-- **Media Sync**: Photos and videos are uploaded to MinIO and shared with all participants.
+Example:
 
----
+```text
+http://192.168.1.5:3001
+```
 
-## 4. Administration
+For Android emulator use:
 
-### Database Management
-Data is stored in your PostgreSQL `atak_db`. You can query it via pgAdmin:
-- `users`: Managed accounts and roles.
-- `messages`: Persistent chat history.
-- `markers`: Shared tactical map data.
+```text
+http://10.0.2.2:3001
+```
 
-### Media Browser
-Visit the MinIO console to browse shared photos/videos:
-- **URL**: `http://localhost:9001`
-- **User**: `atakadmin`
-- **Pass**: `atakadmin123`
+## Main Features Available To Users
 
----
+### Chat
 
-## 5. Troubleshooting
+- instant room-based chat
+- direct messages
+- recent message sync
 
-| Issue | Solution |
-| :--- | :--- |
-| **Server won't start** | Check if port `3000` or `8091` is in use by another app. |
-| **App can't find server** | Ensure Windows Firewall allows ports `3000`, `8080`, and `8091`. |
-| **Database error** | Verify `POSTGRES_PASSWORD` in your `.env` file matches pgAdmin. |
+### Map Synchronization
+
+- live location updates
+- tactical markers
+- zones
+- routes
+- drawings
+- distance measurements
+- alerts
+
+### Media
+
+- image upload
+- video upload
+- audio upload
+
+### Live Stream
+
+- one user can publish a stream
+- other users can subscribe and watch
+
+### Presence
+
+- online / offline user tracking using heartbeat updates
+
+## Data Storage
+
+In full mode:
+
+- PostgreSQL stores structured tactical data
+- MinIO stores media files
+
+Examples of stored data:
+
+- users
+- messages
+- locations
+- markers
+- routes
+- drawings
+- alerts
+- device settings
+- presence
+
+## Environment Setup
+
+Use `api/.env.example` as the template for your local `.env`.
+
+Important values you should check:
+
+- `PORT`
+- `SERVER_URL`
+- `JWT_SECRET_KEY`
+- `POSTGRES_HOST`
+- `POSTGRES_PORT`
+- `POSTGRES_USER`
+- `POSTGRES_PASSWORD`
+- `POSTGRES_DB`
+- `MINIO_ENDPOINT`
+- `MINIO_PORT`
+- `MINIO_ACCESS_KEY`
+- `MINIO_SECRET_KEY`
+
+## Troubleshooting
+
+| Problem | What to check |
+|---|---|
+| Server not reachable | Make sure the backend is really running on `3001` |
+| Auto-discovery fails | Check Windows Firewall and UDP port `8091` |
+| Database errors | Check PostgreSQL container and credentials |
+| Media upload fails | Check MinIO is running on `9000` / `9001` |
+| JWT problems | Make sure the same `JWT_SECRET_KEY` is used where required |
+| Android app cannot connect | Make sure phone and PC are on the same network, or enter the server IP manually |
+
+## Important Clarification
+
+Some older notes may still mention port `3000`.
+
+For the current setup in this repo, the important backend port is:
+
+```text
+3001
+```

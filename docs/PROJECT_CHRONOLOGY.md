@@ -1,50 +1,151 @@
 # ATAK Project Chronology & System Evolution
 
-This document summarizes the major milestones and technical updates performed to synchronize the ATAK Mobile Application with the integrated Backend infrastructure.
+This document explains, in simple words, how the ATAK mobile system and the `ATAK_MI_Server` backend evolved into the current integrated setup.
 
 ---
 
-## 1. ATAK Mobile App Synchronization
-We recently updated the **ATAK Mobile Application** to its latest iteration, ensuring it supports modern tactical features while maintaining stability on field devices.
+## 1. Mobile App Stabilization
 
-### Key Mobile Updates:
-- **Codebase Modernization**: Updated `MainActivity.java` and related components to resolve symbol errors (e.g., `ExecutorService`, `roomMessages`) inherited from the latest tactical package.
-- **Stability & Performance**:
-    - Addressed **ANR (Application Not Responding)** and **Memory Leak** issues that occurred when accessing the Chat module.
-    - Optimized background execution using dedicated threading models (`ExecutorService`) for database operations.
-    - Improved compatibility with the new room-based communication architecture.
+One major part of the work was improving the Android tactical client so it could work reliably with the backend.
 
----
+Key work included:
 
-## 2. The Birth of `ATAK_MI_Server`
-The most significant achievement has been the creation of the **ATAK_MI_Server** (Maritime Integrated Server). This server was born from merging the best of two worlds:
+- resolving code integration issues in `MainActivity.java` and related classes
+- fixing symbol and threading issues from merged tactical code
+- reducing ANR and memory-related instability
+- improving support for room-based communication and synchronized tactical data
 
-### A. The "Tactical" Layer (from `ATAK-CIV-Package`)
-- **Realtime WebSockets**: Ported the Node.js chat logic into a high-performance Python FastAPI system.
-- **UDP Auto-Discovery**: Retained the ability for mobile devices to find the server instantly on any local network (Port `8091`).
-- **Tactical Protocols**: Fully implemented the exact JSON payloads (Join, Subscribe, Marker, Location) used by the tactical devices.
-
-### B. The "Enterprise" Layer (from `InternetFacingDB`)
-- **Robust Persistence**: Replaced simple JSON file storage with a professional **PostgreSQL** database.
-- **Media Object Storage**: Integrated **MinIO** (Amazon S3 compatible) for professional handling of photos, videos, and voice memos.
-- **Secure Infrastructure**: Added JWT-based authentication and secure password hashing.
-- **Deployment Automation**: Created the `start_server.ps1` script to orchestrate everything (Docker, FastAPI, MQTT).
+This made the mobile side more stable when handling chat, map updates, and continuous background activity.
 
 ---
 
-## 3. Integrated Service Stack
-The current `ATAK_MI_Server` now runs a unified stack that supports both tactical field operations and enterprise data management:
+## 2. Creation of `ATAK_MI_Server`
 
-| Service | Technology | Role |
-|---------|------------|------|
-| **Core API** | FastAPI (Python) | Unified backend handling all tactical & sync logic. |
-| **Realtime** | WebSockets | Instant bi-directional communication (Chat/Markers). |
-| **Discovery** | UDP Service | Auto-detects the server for mobile devices. |
-| **Database** | PostgreSQL | Persistent, structured storage for tactical history. |
-| **Storage** | MinIO | Secure storage for large binary media files. |
-| **Broker** | Mosquitto (MQTT) | Tactical target stream ingestion for field sensors. |
+The backend server was created as a merged solution instead of keeping separate systems.
+
+The idea was:
+
+- keep the fast tactical real-time behavior
+- add proper backend storage and deployment structure
+
+This server effectively combines:
+
+### Tactical Realtime Layer
+
+- WebSocket-based room communication
+- instant relay of chat and tactical events
+- UDP auto-discovery for local WiFi environments
+- support for tactical message payloads used by the Android devices
+
+### Enterprise / Persistent Layer
+
+- PostgreSQL for structured data storage
+- MinIO for storing media files
+- JWT authentication
+- Docker-based deployment
+- support for cloud and local deployment paths
 
 ---
 
-## 4. Current Status: Ready for Field Use
-All services have been verified. The server is "field-ready," allowing mobile devices to register, discover the server, participate in encrypted tactical chat, and sync media assets seamlessly to a professional database.
+## 3. What The Server Supports Today
+
+The current integrated backend supports:
+
+- user registration and login
+- JWT-based protected access
+- real-time chat
+- room-based communication
+- GPS location sharing
+- tactical markers and zones
+- routes and measurements
+- drawing synchronization
+- alerts / SOS events
+- presence heartbeat updates
+- live stream support
+- media upload support
+- LoRa / Meshtastic-related server support
+
+In simple words:
+
+> the server acts as the central tactical coordination hub for all connected devices.
+
+---
+
+## 4. Local Full Stack Architecture
+
+The local deployment is now designed around a proper service stack:
+
+| Service | Technology | Purpose |
+|---|---|---|
+| Core API | FastAPI | Main backend and WebSocket server |
+| Realtime Transport | WebSockets | Live chat and tactical synchronization |
+| Discovery | UDP | Automatic server discovery on local WiFi |
+| Database | PostgreSQL | Persistent storage for structured data |
+| Object Storage | MinIO | Media storage |
+| Optional Broker | Mosquitto MQTT | Tactical sensor / external integration support |
+
+This gives a much more complete system than a simple relay-only chat backend.
+
+---
+
+## 5. Deployment Improvements
+
+The project now supports multiple deployment styles:
+
+### Local Full Mode
+
+Used for:
+
+- development
+- testing
+- field laptop / local network operations
+- persistent data and media storage
+
+### Cloud / Relay Mode
+
+Used for:
+
+- public cloud deployment
+- lighter real-time relay behavior
+- scenarios where persistence is not the main concern
+
+This separation makes the server more flexible for different operational environments.
+
+---
+
+## 6. Documentation Cleanup and Clarification
+
+Another important part of the work has been improving the project documentation so it matches the real running setup.
+
+This included clarifying:
+
+- what the server actually does
+- how the local Docker setup works
+- what ports are actually used
+- the difference between local full mode and cloud relay mode
+- how Android devices connect
+- how the backend pieces fit together
+
+Important clarification from the current repo state:
+
+- API port is `3001`
+- local PostgreSQL host port is `5433`
+- MinIO uses `9000` and `9001`
+- UDP discovery uses `8091`
+
+Older notes that mention port `3000` do not describe the current local setup accurately.
+
+---
+
+## 7. Current Status
+
+The server has grown from a simple tactical communication concept into a more complete integrated backend that supports:
+
+- real-time tactical communication
+- persistent backend storage
+- media management
+- local network discovery
+- cloud deployment support
+- future tactical integrations
+
+The system is now much closer to a practical field backend than an early prototype.
