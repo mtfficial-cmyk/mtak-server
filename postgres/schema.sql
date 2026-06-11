@@ -29,17 +29,23 @@ CREATE INDEX IF NOT EXISTS idx_locations_ts     ON locations(ts DESC);
 
 -- 2. CHAT MESSAGES
 CREATE TABLE IF NOT EXISTS messages (
-    id            BIGSERIAL PRIMARY KEY,
-    device_id     TEXT        NOT NULL,
-    username      TEXT        NOT NULL,
-    room          TEXT        NOT NULL DEFAULT 'lobby',
-    message_text  TEXT        NOT NULL,
-    ts            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    synced_to_t2  BOOLEAN     NOT NULL DEFAULT FALSE
+    id             BIGSERIAL PRIMARY KEY,
+    device_id      TEXT        NOT NULL,
+    username       TEXT        NOT NULL,
+    room           TEXT        NOT NULL DEFAULT 'lobby',
+    message_text   TEXT        NOT NULL,
+    ts             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    synced_to_t2   BOOLEAN     NOT NULL DEFAULT FALSE,
+    device_msg_id  TEXT        -- Android UUID; NULL for non-Android senders
 );
 CREATE INDEX IF NOT EXISTS idx_messages_room ON messages(room);
 CREATE INDEX IF NOT EXISTS idx_messages_ts   ON messages(ts DESC);
+-- Partial unique index: prevents double-insert of the same Android message UUID.
+-- NULL values are excluded so non-Android rows never conflict.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_messages_device_msg_id
+    ON messages(device_msg_id)
+    WHERE device_msg_id IS NOT NULL;
 
 -- 3. MAP MARKERS
 CREATE TABLE IF NOT EXISTS markers (
@@ -158,6 +164,32 @@ CREATE TABLE IF NOT EXISTS adsb_snapshots (
     ts            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     synced_to_t2  BOOLEAN     NOT NULL DEFAULT FALSE
+);
+
+-- 10a. DRAWINGS (freehand shapes, polygons, annotations from Drawing Tools)
+CREATE TABLE IF NOT EXISTS drawings (
+    id            BIGSERIAL PRIMARY KEY,
+    drawing_uid   TEXT        NOT NULL,
+    device_id     TEXT        NOT NULL,
+    username      TEXT        NOT NULL,
+    room          TEXT        NOT NULL DEFAULT 'lobby',
+    drawing_type  TEXT        NOT NULL DEFAULT 'freehand', -- 'freehand' | 'polygon' | 'line' | 'circle'
+    color         TEXT        NOT NULL DEFAULT '#FF0000',
+    label         TEXT,
+    geojson       JSONB       NOT NULL,                   -- GeoJSON Feature payload
+    ts            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    synced_to_t2  BOOLEAN     NOT NULL DEFAULT FALSE,
+    UNIQUE(drawing_uid)
+);
+CREATE INDEX IF NOT EXISTS idx_drawings_room ON drawings(room);
+CREATE INDEX IF NOT EXISTS idx_drawings_ts   ON drawings(ts DESC);
+
+-- 10b. DEVICE SETTINGS (per-user toggle state — Night Vision, Grid, ADSB, Track History)
+CREATE TABLE IF NOT EXISTS device_settings (
+    username      TEXT        NOT NULL PRIMARY KEY,
+    settings      JSONB       NOT NULL DEFAULT '{}',      -- arbitrary key/value toggle map
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- 10. PRESENCE

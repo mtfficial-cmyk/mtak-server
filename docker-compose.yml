@@ -8,7 +8,7 @@ services:
       POSTGRES_PASSWORD: "123456"
       POSTGRES_DB: atak_db
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - atak_pg_data:/var/lib/postgresql/data
       - ./postgres/schema.sql:/docker-entrypoint-initdb.d/schema.sql
@@ -26,6 +26,32 @@ services:
       - "9001:9001"
     volumes:
       - atak_minio_data:/data
+
+  atak-server:
+    image: atak-mi-server:latest
+    container_name: atak-mi-server
+    restart: unless-stopped
+    depends_on:
+      - postgres
+      - minio
+    environment:
+      RELAY_MODE: "false"
+      PORT: "3001"
+      SERVER_URL: "http://100.83.151.84:3001"
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: "123456"
+      POSTGRES_DB: atak_db
+      MINIO_ENDPOINT: minio
+      MINIO_PORT: "9000"
+      MINIO_USE_SSL: "false"
+      MINIO_ACCESS_KEY: atakadmin
+      MINIO_SECRET_KEY: atakadmin123
+      MQTT_ENABLED: "false"
+      JWT_SECRET_KEY: "tactical-secret-change-me"
+    ports:
+      - "3001:3001"
 
 volumes:
   atak_pg_data:

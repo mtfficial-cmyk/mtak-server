@@ -81,3 +81,36 @@ class AlertIn(BaseModel):
     alert_type: str = "DEFAULT"
     alert_text: str
     ts:         Optional[str] = None
+
+class RouteIn(BaseModel):
+    device_id:    str
+    username:     str
+    room:         str = "lobby"
+    route_uid:    str
+    route_name:   Optional[str] = None
+    waypoints:    Any                  # JSON array of {lat, lon} objects
+    total_dist_m: Optional[float] = None
+    ts:           Optional[str] = None
+
+class MeasurementIn(BaseModel):
+    device_id:   str
+    username:    str
+    room:        str = "lobby"
+    measure_uid: str
+    start_lat:   float
+    start_lon:   float
+    end_lat:     float
+    end_lon:     float
+    distance_m:  float
+    ts:          Optional[str] = None
+
+class DrawingIn(BaseModel):
+    device_id:    str
+    username:     str
+    room:         str = "lobby"
+    drawing_uid:  str
+    drawing_type: str = "freehand"
+    color:        str = "#FF0000"
+    label:        Optional[str] = None
+    geojson:      Any                  # GeoJSON Feature object
+    ts:           Optional[str] = None

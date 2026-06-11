@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Optional, List
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, UploadFile, File, Form, HTTPException, Query
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from asyncpg.exceptions import UniqueViolationError as IntegrityError
@@ -84,6 +84,91 @@ _heartbeat_lora_names: dict = {}
 _heartbeat_lora_ids:   dict = {}
 ONLINE_TIMEOUT_SEC = 60
 
+# ── Live Streaming State (in-memory, works in both relay and full mode) ───────
+# stream_id (= streamer's username) → {"streamer": str, "started_at": str}
+_active_streams:     dict = {}
+# stream_id → set of subscriber WebSockets
+_stream_subscribers: dict = {}
+
+# HTML template for the in-app WebView viewer.
+# "__STREAM_ID__" is replaced at request time; plain strings avoid f-string
+# brace escaping across the embedded JavaScript.
+_LIVE_VIEWER_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+  <title>Live Stream</title>
+  <style>
+    *{margin:0;padding:0;box-sizing:border-box}
+    body{background:#0A0A0E;color:#E2E8F0;font-family:monospace;height:100vh;
+         display:flex;flex-direction:column;overflow:hidden}
+    #hdr{background:rgba(0,0,0,.75);padding:8px 14px;display:flex;
+         align-items:center;gap:10px;flex-shrink:0}
+    #dot{width:8px;height:8px;border-radius:50%;background:#64748B;flex-shrink:0}
+    #dot.live{background:#4ADE80;animation:blink 1.2s ease-in-out infinite}
+    @keyframes blink{0%,100%{opacity:1}50%{opacity:.35}}
+    #lbl{font-size:12px;color:#00BAFF;flex:1;letter-spacing:.04em}
+    #fps{font-size:11px;color:#4ADE80}
+    #wrap{flex:1;display:flex;align-items:center;justify-content:center;overflow:hidden}
+    img#frm{max-width:100%;max-height:100%;object-fit:contain;display:none}
+    #idle{text-align:center;color:#4A5568;font-size:14px;line-height:1.9}
+  </style>
+</head>
+<body>
+  <div id="hdr">
+    <div id="dot"></div>
+    <span id="lbl">Connecting…</span>
+    <span id="fps"></span>
+  </div>
+  <div id="wrap">
+    <img id="frm" alt="">
+    <div id="idle">📡<br>Waiting for stream…</div>
+  </div>
+<script>
+(function(){
+  var SID  = '__STREAM_ID__';
+  var wpro = location.protocol==='https:'?'wss:':'ws:';
+  var wurl = wpro+'//'+location.host+'/stream';
+  var ws, frames=0, t0=Date.now(), prev=null;
+  var dot=document.getElementById('dot');
+  var lbl=document.getElementById('lbl');
+  var fps=document.getElementById('fps');
+  var frm=document.getElementById('frm');
+  var idle=document.getElementById('idle');
+
+  function setLive(on){
+    if(on){dot.classList.add('live');frm.style.display='block';idle.style.display='none';}
+    else  {dot.classList.remove('live');frm.style.display='none';idle.style.display='block';}
+  }
+
+  function connect(){
+    ws=new WebSocket(wurl);
+    ws.binaryType='arraybuffer';
+    ws.onopen=function(){ws.send(JSON.stringify({action:'subscribe',stream_id:SID}));};
+    ws.onmessage=function(e){
+      if(typeof e.data==='string'){
+        var m=JSON.parse(e.data);
+        if(m.status==='ok'){lbl.textContent='📡 LIVE — '+SID;setLive(true);}
+        else if(m.event==='publisher_offline'){lbl.textContent='Stream ended';fps.textContent='';setLive(false);}
+        return;
+      }
+      if(prev)URL.revokeObjectURL(prev);
+      var b=new Blob([e.data],{type:'image/jpeg'});
+      prev=URL.createObjectURL(b);frm.src=prev;
+      frames++;
+      var n=Date.now();
+      if(n-t0>=1000){fps.textContent=frames+' FPS';frames=0;t0=n;}
+    };
+    ws.onerror=function(){lbl.textContent='Connection error — retrying…';};
+    ws.onclose=function(){setLive(false);lbl.textContent='Reconnecting…';setTimeout(connect,3000);};
+  }
+  connect();
+})();
+</script>
+</body>
+</html>"""
+
 
 def _purge_stale_heartbeat_state(now: Optional[float] = None) -> set:
     now = now or time.time()
@@ -118,6 +203,50 @@ async def lifespan(app: FastAPI):
             database=PG_DB, min_size=2, max_size=10,
         )
         logging.info("[DB] PostgreSQL pool ready")
+
+        # Schema migrations — safe on every restart (IF NOT EXISTS)
+        try:
+            await db_pool.execute(
+                "ALTER TABLE messages ADD COLUMN IF NOT EXISTS device_msg_id TEXT"
+            )
+            await db_pool.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_messages_device_msg_id
+                ON messages(device_msg_id)
+                WHERE device_msg_id IS NOT NULL
+                """
+            )
+            # Drawings table (Drawing Tools tool)
+            await db_pool.execute("""
+                CREATE TABLE IF NOT EXISTS drawings (
+                    id           BIGSERIAL PRIMARY KEY,
+                    drawing_uid  TEXT        NOT NULL,
+                    device_id    TEXT        NOT NULL,
+                    username     TEXT        NOT NULL,
+                    room         TEXT        NOT NULL DEFAULT 'lobby',
+                    drawing_type TEXT        NOT NULL DEFAULT 'freehand',
+                    color        TEXT        NOT NULL DEFAULT '#FF0000',
+                    label        TEXT,
+                    geojson      JSONB       NOT NULL DEFAULT '{}',
+                    ts           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    synced_to_t2 BOOLEAN     NOT NULL DEFAULT FALSE,
+                    UNIQUE(drawing_uid)
+                )
+            """)
+            await db_pool.execute("CREATE INDEX IF NOT EXISTS idx_drawings_room ON drawings(room)")
+            await db_pool.execute("CREATE INDEX IF NOT EXISTS idx_drawings_ts ON drawings(ts DESC)")
+            # Device settings table (Night Vision, Grid, ADSB, Track History toggles)
+            await db_pool.execute("""
+                CREATE TABLE IF NOT EXISTS device_settings (
+                    username   TEXT        NOT NULL PRIMARY KEY,
+                    settings   JSONB       NOT NULL DEFAULT '{}',
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            logging.info("[DB] Schema migrations applied (device_msg_id, drawings, device_settings)")
+        except Exception as _e:
+            logging.warning(f"[DB] Migration warning (non-fatal): {_e}")
 
         # 2. MinIO
         from minio import Minio
@@ -336,6 +465,147 @@ async def post_alert(body: AlertIn):
     return {"success": True}
 
 
+# ── Routes ───────────────────────────────────────────────────────────────────
+@app.post("/api/route", status_code=201)
+async def post_route(body: RouteIn):
+    import json as _json
+    if db_pool:
+        waypoints_json = _json.dumps(body.waypoints) if not isinstance(body.waypoints, str) else body.waypoints
+        await db_pool.execute(
+            """INSERT INTO routes
+                 (route_uid, device_id, username, room, route_name, waypoints, total_dist_m, ts)
+               VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,COALESCE($8::timestamptz, NOW()))
+               ON CONFLICT (route_uid) DO UPDATE SET
+                 route_name=EXCLUDED.route_name, waypoints=EXCLUDED.waypoints,
+                 total_dist_m=EXCLUDED.total_dist_m""",
+            body.route_uid, body.device_id, body.username, body.room,
+            body.route_name, waypoints_json, body.total_dist_m, body.ts,
+        )
+    await manager.broadcast(body.room, {
+        "type": "route", "user": body.username, "room": body.room,
+        "id": body.route_uid, "name": body.route_name,
+        "ts": body.ts or datetime.now().isoformat(),
+    })
+    return {"success": True}
+
+
+@app.get("/api/routes")
+async def get_routes(room: str = Query(None), limit: int = Query(200)):
+    if RELAY_MODE or not db_pool:
+        return {"routes": []}
+    if room:
+        rows = await db_pool.fetch(
+            "SELECT id,route_uid,device_id,username,room,route_name,waypoints,total_dist_m,ts FROM routes WHERE room=$1 ORDER BY ts DESC LIMIT $2",
+            room, limit,
+        )
+    else:
+        rows = await db_pool.fetch(
+            "SELECT id,route_uid,device_id,username,room,route_name,waypoints,total_dist_m,ts FROM routes ORDER BY ts DESC LIMIT $1",
+            limit,
+        )
+    def _s(v): return v.isoformat() if isinstance(v, datetime) else v
+    return {"routes": [{k: _s(v) for k, v in dict(r).items()} for r in rows]}
+
+
+# ── Measurements ──────────────────────────────────────────────────────────────
+@app.post("/api/measurement", status_code=201)
+async def post_measurement(body: MeasurementIn):
+    if db_pool:
+        await db_pool.execute(
+            """INSERT INTO measurements
+                 (measure_uid, device_id, username, room, start_lat, start_lon, end_lat, end_lon, distance_m, ts)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,COALESCE($10::timestamptz, NOW()))
+               ON CONFLICT (measure_uid) DO UPDATE SET
+                 start_lat=EXCLUDED.start_lat, start_lon=EXCLUDED.start_lon,
+                 end_lat=EXCLUDED.end_lat, end_lon=EXCLUDED.end_lon,
+                 distance_m=EXCLUDED.distance_m""",
+            body.measure_uid, body.device_id, body.username, body.room,
+            body.start_lat, body.start_lon, body.end_lat, body.end_lon,
+            body.distance_m, body.ts,
+        )
+    await manager.broadcast(body.room, {
+        "type": "measurement", "user": body.username, "room": body.room,
+        "id": body.measure_uid, "distance_m": body.distance_m,
+        "ts": body.ts or datetime.now().isoformat(),
+    })
+    return {"success": True}
+
+
+# ── Drawings ──────────────────────────────────────────────────────────────────
+@app.post("/api/drawing", status_code=201)
+async def post_drawing(body: DrawingIn):
+    import json as _json
+    if db_pool:
+        geojson_str = _json.dumps(body.geojson) if not isinstance(body.geojson, str) else body.geojson
+        await db_pool.execute(
+            """INSERT INTO drawings
+                 (drawing_uid, device_id, username, room, drawing_type, color, label, geojson, ts)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,COALESCE($9::timestamptz, NOW()))
+               ON CONFLICT (drawing_uid) DO UPDATE SET
+                 drawing_type=EXCLUDED.drawing_type, color=EXCLUDED.color,
+                 label=EXCLUDED.label, geojson=EXCLUDED.geojson""",
+            body.drawing_uid, body.device_id, body.username, body.room,
+            body.drawing_type, body.color, body.label, geojson_str, body.ts,
+        )
+    await manager.broadcast(body.room, {
+        "type": "drawing", "user": body.username, "room": body.room,
+        "id": body.drawing_uid, "drawingType": body.drawing_type,
+        "color": body.color, "ts": body.ts or datetime.now().isoformat(),
+    })
+    return {"success": True}
+
+
+@app.delete("/api/drawing/{drawing_uid}", status_code=200)
+async def delete_drawing(drawing_uid: str):
+    if db_pool:
+        await db_pool.execute("DELETE FROM drawings WHERE drawing_uid=$1", drawing_uid)
+    return {"success": True, "drawing_uid": drawing_uid}
+
+
+@app.get("/api/drawings")
+async def get_drawings(room: str = Query(None), limit: int = Query(200)):
+    if RELAY_MODE or not db_pool:
+        return {"drawings": []}
+    if room:
+        rows = await db_pool.fetch(
+            "SELECT id,drawing_uid,device_id,username,room,drawing_type,color,label,geojson,ts FROM drawings WHERE room=$1 ORDER BY ts DESC LIMIT $2",
+            room, limit,
+        )
+    else:
+        rows = await db_pool.fetch(
+            "SELECT id,drawing_uid,device_id,username,room,drawing_type,color,label,geojson,ts FROM drawings ORDER BY ts DESC LIMIT $1",
+            limit,
+        )
+    def _s(v): return v.isoformat() if isinstance(v, datetime) else v
+    return {"drawings": [{k: _s(v) for k, v in dict(r).items()} for r in rows]}
+
+
+# ── Device Settings (toggle state persistence) ────────────────────────────────
+@app.get("/api/device-settings/{username}")
+async def get_device_settings(username: str):
+    if RELAY_MODE or not db_pool:
+        return {"username": username, "settings": {}}
+    row = await db_pool.fetchrow(
+        "SELECT settings FROM device_settings WHERE LOWER(username)=LOWER($1)", username
+    )
+    return {"username": username, "settings": dict(row["settings"]) if row else {}}
+
+
+@app.put("/api/device-settings/{username}", status_code=200)
+async def put_device_settings(username: str, body: dict):
+    if db_pool:
+        import json as _json
+        await db_pool.execute(
+            """INSERT INTO device_settings (username, settings, updated_at)
+               VALUES ($1, $2::jsonb, NOW())
+               ON CONFLICT (username) DO UPDATE
+                 SET settings=device_settings.settings || EXCLUDED.settings,
+                     updated_at=NOW()""",
+            username, _json.dumps(body),
+        )
+    return {"success": True, "username": username}
+
+
 # ── Media (local only — requires MinIO) ──────────────────────────────────────
 def _upload_to_minio(bucket: str, room: str, username: str, ext: str, data: bytes, mime: str) -> str:
     key = f"{room}/{username}/{uuid.uuid4()}.{ext}"
@@ -444,9 +714,12 @@ async def batch_messages(body: dict):
             ts           = datetime.fromtimestamp(ts_ms / 1000.0) if ts_ms else datetime.now()
             if message_type == "text" and text:
                 await db_pool.execute(
-                    """INSERT INTO messages (device_id, username, room, message_text, ts)
-                       VALUES ($1,$2,$3,$4,$5)""",
-                    msg_id[:50], sender, room, text, ts,
+                    """INSERT INTO messages
+                           (device_id, username, room, message_text, ts, device_msg_id)
+                       VALUES ($1,$2,$3,$4,$5,$6)
+                       ON CONFLICT (device_msg_id) WHERE device_msg_id IS NOT NULL
+                       DO NOTHING""",
+                    msg_id[:50], sender, room, text, ts, msg_id,
                 )
         except Exception as e:
             logging.warning(f"[batch_messages] {msg_id}: {e}")
@@ -462,24 +735,87 @@ async def get_messages(room: str = Query(None), since: float = Query(0)):
     since_sec = since / 1000.0
     if room:
         rows = await db_pool.fetch(
-            """SELECT id, username, room, message_text, ts
+            """SELECT id, username, room, message_text, ts, device_msg_id
                FROM messages WHERE room=$1 AND ts > to_timestamp($2)
                ORDER BY ts ASC LIMIT 100""",
             room, since_sec,
         )
     else:
         rows = await db_pool.fetch(
-            """SELECT id, username, room, message_text, ts
+            """SELECT id, username, room, message_text, ts, device_msg_id
                FROM messages WHERE ts > to_timestamp($1)
                ORDER BY ts ASC LIMIT 100""",
             since_sec,
         )
     return {"messages": [
-        {"msgId": str(r["id"]), "sender": r["username"], "room": r["room"],
+        {"msgId": r["device_msg_id"] or str(r["id"]), "sender": r["username"], "room": r["room"],
          "text": r["message_text"], "messageType": "text",
          "timestamp": int(r["ts"].timestamp() * 1000)}
         for r in rows
     ]}
+
+
+@app.post("/api/messages/dedup", status_code=200)
+async def dedup_messages(room: str = Query(None)):
+    """
+    Remove duplicate messages from the messages table, keeping the earliest
+    copy of each unique (username, room, message_text) fingerprint.
+    Optionally scoped to a single room via ?room=lobby.
+    Returns how many duplicate rows were deleted.
+    """
+    _require_db()
+    try:
+        if room:
+            result = await db_pool.execute(
+                """
+                DELETE FROM messages
+                WHERE id NOT IN (
+                    SELECT MIN(id)
+                    FROM   messages
+                    WHERE  room = $1
+                    GROUP  BY username, room, message_text
+                )
+                AND room = $1
+                """,
+                room,
+            )
+        else:
+            result = await db_pool.execute(
+                """
+                DELETE FROM messages
+                WHERE id NOT IN (
+                    SELECT MIN(id)
+                    FROM   messages
+                    GROUP  BY username, room, message_text
+                )
+                """
+            )
+        # asyncpg returns "DELETE N" as a string
+        deleted = int(result.split()[-1]) if result else 0
+        return {"deleted": deleted, "message": f"Removed {deleted} duplicate message(s)"}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.delete("/api/messages", status_code=200)
+async def clear_messages(room: str = Query(None)):
+    """
+    Hard-delete all messages, or only messages in a specific room.
+    Pass ?room=lobby to clear only that room; omit for a full wipe.
+    Returns how many rows were deleted.
+    """
+    _require_db()
+    try:
+        if room:
+            result = await db_pool.execute(
+                "DELETE FROM messages WHERE room = $1", room
+            )
+        else:
+            result = await db_pool.execute("DELETE FROM messages")
+        deleted = int(result.split()[-1]) if result else 0
+        return {"deleted": deleted, "message": f"Cleared {deleted} message(s)"}
+    except Exception as e:
+        raise HTTPException(500, str(e))
 
 
 @app.get("/api/users/all")
@@ -611,34 +947,21 @@ def health():
 
 @app.get("/api/config")
 def get_config():
-    """
-    Returns the public server URL.
-    In relay mode (Render): SERVER_URL env var.
-    In local mode: queries ngrok if running, falls back to SERVER_URL.
-    """
-    if SERVER_URL:
-        return {"server_url": SERVER_URL, "ngrok": False}
-    if not RELAY_MODE:
-        try:
-            import urllib.request, json as _json
-            with urllib.request.urlopen("http://localhost:4040/api/tunnels", timeout=2) as r:
-                data = _json.loads(r.read())
-                for tunnel in data.get("tunnels", []):
-                    if tunnel.get("proto") == "https":
-                        return {"server_url": tunnel["public_url"], "ngrok": True}
-        except Exception:
-            pass
-    return {"server_url": None, "ngrok": False}
+    """Returns the public server URL from SERVER_URL env var."""
+    return {"server_url": SERVER_URL}
 
 
 # ── Maritime sync export (local only) ─────────────────────────────────────────
 _EXPORT_QUERIES = {
-    "messages":  "SELECT id,device_id,username,room,message_text,ts FROM messages ORDER BY ts DESC LIMIT 500",
-    "locations": "SELECT id,device_id,username,room,latitude,longitude,accuracy_m,ts FROM locations ORDER BY ts DESC LIMIT 500",
-    "alerts":    "SELECT id,device_id,username,room,alert_type,alert_text,ts FROM alerts ORDER BY ts DESC LIMIT 500",
-    "markers":   "SELECT id,marker_uid,device_id,username,room,marker_type,color,latitude,longitude,label,ts FROM markers ORDER BY ts DESC LIMIT 500",
-    "zones":     "SELECT id,zone_uid,device_id,username,room,status,latitude,longitude,radius_m,description,ts FROM zones ORDER BY ts DESC LIMIT 500",
-    "media":     "SELECT id,device_id,username,room,media_type,bucket_name AS bucket,object_key,file_size_b AS file_size_bytes,mime_type,ts FROM media ORDER BY ts DESC LIMIT 100",
+    "messages":     "SELECT id,device_id,username,room,message_text,ts FROM messages ORDER BY ts DESC LIMIT 500",
+    "locations":    "SELECT id,device_id,username,room,latitude,longitude,accuracy_m,ts FROM locations ORDER BY ts DESC LIMIT 500",
+    "alerts":       "SELECT id,device_id,username,room,alert_type,alert_text,ts FROM alerts ORDER BY ts DESC LIMIT 500",
+    "markers":      "SELECT id,marker_uid,device_id,username,room,marker_type,color,latitude,longitude,label,ts FROM markers ORDER BY ts DESC LIMIT 500",
+    "zones":        "SELECT id,zone_uid,device_id,username,room,status,latitude,longitude,radius_m,description,ts FROM zones ORDER BY ts DESC LIMIT 500",
+    "media":        "SELECT id,device_id,username,room,media_type,bucket_name AS bucket,object_key,file_size_b AS file_size_bytes,mime_type,ts FROM media ORDER BY ts DESC LIMIT 100",
+    "routes":       "SELECT id,route_uid,device_id,username,room,route_name,waypoints,total_dist_m,ts FROM routes ORDER BY ts DESC LIMIT 200",
+    "measurements": "SELECT id,measure_uid,device_id,username,room,start_lat,start_lon,end_lat,end_lon,distance_m,ts FROM measurements ORDER BY ts DESC LIMIT 500",
+    "drawings":     "SELECT id,drawing_uid,device_id,username,room,drawing_type,color,label,geojson,ts FROM drawings ORDER BY ts DESC LIMIT 200",
 }
 
 
@@ -698,15 +1021,17 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(None)):
                 await manager.connect(websocket, user, room)
 
                 if db_pool:
-                    # Send last 50 messages
+                    # Send last 50 messages — use device_msg_id so Android
+                    # Room DB dedup (IGNORE on msg_id) correctly suppresses
+                    # messages the device already has locally.
                     msgs = await db_pool.fetch(
-                        "SELECT id, username, message_text, ts FROM messages WHERE room=$1 ORDER BY ts DESC LIMIT 50",
+                        "SELECT id, username, message_text, ts, device_msg_id FROM messages WHERE room=$1 ORDER BY ts DESC LIMIT 50",
                         room,
                     )
                     for m in reversed(msgs):
                         await manager.send_personal_message({
                             "type":  "message",
-                            "msgId": f"srv-{m['id']}",
+                            "msgId": m["device_msg_id"] or f"srv-{m['id']}",
                             "user":  m["username"],
                             "room":  room,
                             "text":  m["message_text"],
@@ -765,9 +1090,13 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(None)):
                     if db_pool:
                         try:
                             await db_pool.execute(
-                                """INSERT INTO messages (device_id, username, room, message_text)
-                                   VALUES ($1,$2,$3,$4)""",
+                                """INSERT INTO messages
+                                       (device_id, username, room, message_text, device_msg_id)
+                                   VALUES ($1,$2,$3,$4,$5)
+                                   ON CONFLICT (device_msg_id) WHERE device_msg_id IS NOT NULL
+                                   DO NOTHING""",
                                 msg_id[:50] if msg_id else "WS", user, room, text,
+                                msg_id or None,
                             )
                         except Exception as e:
                             logging.warning(f"WS message DB error: {e}")
@@ -791,6 +1120,188 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(None)):
     except Exception as e:
         logging.warning(f"WS error: {e}")
         manager.disconnect(websocket)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LIVE STREAMING  —  follows the ServerStream-main publish/subscribe protocol
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/live-streams")
+async def list_live_streams():
+    """Return the list of currently active live streams."""
+    return {
+        "streams": [
+            {
+                "user":       sid,
+                "url":        f"/live/{sid}",
+                "started_at": info["started_at"],
+                "viewers":    len(_stream_subscribers.get(sid, set())),
+            }
+            for sid, info in _active_streams.items()
+        ]
+    }
+
+
+@app.get("/live/{stream_id}")
+async def stream_viewer_page(stream_id: str):
+    """
+    Serve the in-app WebView viewer page.
+    The page opens a WebSocket subscriber connection to /stream internally.
+    """
+    html = _LIVE_VIEWER_HTML.replace("__STREAM_ID__", stream_id)
+    return HTMLResponse(html)
+
+
+@app.websocket("/stream")
+async def stream_ws(websocket: WebSocket):
+    """
+    WebSocket streaming broker — mirrors the ServerStream-main protocol.
+
+    Publisher  registration (first text frame):
+        {"action": "publish",   "stream_id": "<username>", "token": "<jwt>"}
+    Subscriber registration (first text frame):
+        {"action": "subscribe", "stream_id": "<username>", "token": "<jwt>"}
+
+    Server confirms:
+        {"status": "ok", "role": "publisher|subscriber", "stream_id": "..."}
+
+    Publisher then streams raw binary JPEG frames (no framing header).
+    Server forwards every frame to all subscribers of that stream_id.
+    On publisher disconnect all subscribers receive:
+        {"event": "publisher_offline", "stream_id": "..."}
+    """
+    await websocket.accept()
+    stream_id: str = ""
+    role:      str = ""        # "pub" | "sub"
+    username:  str = "unknown"
+
+    try:
+        # ── Handshake — first text frame must be a registration JSON ─────────
+        raw      = await asyncio.wait_for(websocket.receive_text(), timeout=10.0)
+        payload  = json.loads(raw)
+        action   = payload.get("action", "")
+        stream_id = str(payload.get("stream_id", "")).strip()
+        token    = payload.get("token",     "")
+
+        if not stream_id or action not in ("publish", "subscribe"):
+            await websocket.send_text(json.dumps({
+                "status":  "error",
+                "message": "Required fields: action (publish|subscribe), stream_id.",
+            }))
+            await websocket.close()
+            return
+
+        # Optional JWT auth — fall back to stream_id as username
+        from auth import decode_token as _dec
+        decoded  = _dec(token) if token else None
+        username = decoded["sub"] if (decoded and "sub" in decoded) else stream_id
+
+        # ── PUBLISHER path ───────────────────────────────────────────────────
+        if action == "publish":
+            role = "pub"
+            _active_streams[stream_id] = {
+                "streamer":   username,
+                "started_at": datetime.utcnow().isoformat(),
+            }
+            _stream_subscribers.setdefault(stream_id, set())
+
+            await websocket.send_text(json.dumps({
+                "status":    "ok",
+                "role":      "publisher",
+                "stream_id": stream_id,
+            }))
+
+            # Notify all chat-connected ATAK clients so they see the LIVE banner
+            await manager.broadcast("lobby", {
+                "type":      "ps_stream",
+                "user":      username,
+                "stream_id": stream_id,
+                "url":       f"/live/{stream_id}",
+                "source":    "device_camera",
+                "lat":       0.0,
+                "lon":       0.0,
+                "ts":        datetime.utcnow().isoformat(),
+            })
+            logging.info(f"[Stream] Publisher online: stream_id={stream_id} user={username}")
+
+            # Frame relay loop — forward every binary frame to all subscribers
+            while True:
+                frame = await websocket.receive_bytes()
+                subs  = list(_stream_subscribers.get(stream_id, set()))
+                dead: list = []
+                for sub_ws in subs:
+                    try:
+                        await sub_ws.send_bytes(frame)
+                    except Exception:
+                        dead.append(sub_ws)
+                for d in dead:
+                    _stream_subscribers[stream_id].discard(d)
+
+        # ── SUBSCRIBER path ──────────────────────────────────────────────────
+        else:
+            role = "sub"
+            _stream_subscribers.setdefault(stream_id, set())
+            _stream_subscribers[stream_id].add(websocket)
+
+            if stream_id in _active_streams:
+                await websocket.send_text(json.dumps({
+                    "status":    "ok",
+                    "role":      "subscriber",
+                    "stream_id": stream_id,
+                }))
+            else:
+                await websocket.send_text(json.dumps({
+                    "event":     "publisher_offline",
+                    "stream_id": stream_id,
+                }))
+            logging.info(f"[Stream] Subscriber joined: stream_id={stream_id}")
+
+            # Keep connection alive; server pings every 30 s
+            while True:
+                try:
+                    await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
+                except asyncio.TimeoutError:
+                    try:
+                        await websocket.send_text(json.dumps({"type": "ping"}))
+                    except Exception:
+                        break
+
+    except WebSocketDisconnect:
+        pass
+    except asyncio.TimeoutError:
+        pass
+    except Exception as exc:
+        logging.warning(f"[Stream WS] Unexpected error: {exc}")
+        try:
+            await websocket.send_text(json.dumps({"status": "error", "message": str(exc)}))
+        except Exception:
+            pass
+
+    finally:
+        # ── Cleanup ──────────────────────────────────────────────────────────
+        if role == "pub" and stream_id:
+            _active_streams.pop(stream_id, None)
+            subs = _stream_subscribers.pop(stream_id, set())
+            offline = json.dumps({"event": "publisher_offline", "stream_id": stream_id})
+            for sub_ws in subs:
+                try:
+                    await sub_ws.send_text(offline)
+                except Exception:
+                    pass
+            logging.info(f"[Stream] Publisher offline: stream_id={stream_id}")
+
+            # Notify chat clients so they can hide the LIVE banner
+            await manager.broadcast("lobby", {
+                "type":      "ps_stream_ended",
+                "user":      username,
+                "stream_id": stream_id,
+                "ts":        datetime.utcnow().isoformat(),
+            })
+
+        elif role == "sub" and stream_id:
+            if stream_id in _stream_subscribers:
+                _stream_subscribers[stream_id].discard(websocket)
+            logging.info(f"[Stream] Subscriber left: stream_id={stream_id}")
 
 
 if __name__ == "__main__":

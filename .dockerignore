@@ -1,0 +1,10 @@
+.git
+__pycache__
+api/__pycache__
+api/*.pyc
+api/.env
+api/.env.*
+scripts/
+docs/
+mosquitto/
+*.md
